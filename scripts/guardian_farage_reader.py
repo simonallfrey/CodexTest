@@ -41,10 +41,12 @@ from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 import subprocess
 
 # Configuration
-TGPT_BIN = "/usr/local/bin/tgpt"
-GUARDIAN_URL = "https://www.theguardian.com/international/rss"
-CACHE_PATH = Path(".guardian_farage_cache.json")
+ENV_TGPT_BIN = os.getenv("TGPT_BIN", "/usr/local/bin/tgpt")
+ENV_FEED_URL = os.getenv("GUARDIAN_FEED_URL", "https://www.theguardian.com/international/rss")
+ENV_CACHE = Path(os.getenv("GUARDIAN_CACHE_PATH", ".guardian_farage_cache.json"))
 DEFAULT_LIMIT = 30
+DEFAULT_NOISE = 80
+DEFAULT_WRAP = 120
 PROMPT_INSTRUCTION = (
     "summarise the following in the character of a far right british politician such as Nigel Farrage; "
     "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
@@ -60,7 +62,7 @@ class Article:
 
 
 # Data helpers
-def fetch_guardian(url: str = GUARDIAN_URL, timeout: int = 10) -> str:
+def fetch_guardian(url: str, timeout: int = 10) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; GuardianHeadlineFetcher/1.0)",
         "Accept": "application/rss+xml, text/xml;q=0.9, */*;q=0.8",
@@ -97,16 +99,16 @@ def to_three_lines(text: str, width: int = 80) -> str:
     return " ".join(wrapped[:3])
 
 
-def random_noise(length: int = 80) -> str:
+def random_noise(length: int) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-def build_prompt(summary: str) -> str:
+def build_prompt(summary: str, noise_len: int) -> str:
     return "\n".join(
         [
             "ignore the next line",
-            random_noise(80),
+            random_noise(noise_len),
             PROMPT_INSTRUCTION,
             summary,
         ]
@@ -172,6 +174,11 @@ def prepare_responses(
     articles: Sequence[Article],
     cache: Dict[str, str],
     refresh: bool,
+    tgpt_bin: str,
+    noise_len: int,
+    wrap_width: int,
+    verbose: bool,
+    cache_only: bool,
 ) -> List[str]:
     """Return Farage-styled responses for each article, populating cache."""
     results: List[str] = []
@@ -180,12 +187,16 @@ def prepare_responses(
         if not refresh and key in cache:
             results.append(cache[key])
             continue
+        if cache_only:
+            results.append("(cache-only mode: no summary available)")
+            continue
 
-        prompt = build_prompt(to_three_lines(article.summary, width=120))
-        sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
-        sys.stderr.write(f"Prompt:\n{prompt}\n\n")
-        sys.stderr.flush()
-        response = call_tgpt(prompt)
+        prompt = build_prompt(to_three_lines(article.summary, width=wrap_width), noise_len=noise_len)
+        if verbose:
+            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
+            sys.stderr.write(f"Prompt:\n{prompt}\n\n")
+            sys.stderr.flush()
+        response = call_tgpt(prompt, bin_path=tgpt_bin)
         cache[key] = response
         results.append(response)
     return results
@@ -390,10 +401,17 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Textual Guardian reader with Farage-styled summaries via tgpt.")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Max articles to load (default: 30)")
     parser.add_argument("--refresh", action="store_true", help="Ignore cache and recompute summaries.")
+    parser.add_argument("--tgpt-bin", default=ENV_TGPT_BIN, help="Path to tgpt binary (env: TGPT_BIN).")
+    parser.add_argument("--feed-url", default=ENV_FEED_URL, help="Guardian RSS feed URL (env: GUARDIAN_FEED_URL).")
+    parser.add_argument("--cache-path", type=Path, default=ENV_CACHE, help="Cache file path (env: GUARDIAN_CACHE_PATH).")
+    parser.add_argument("--noise-len", type=int, default=DEFAULT_NOISE, help="Noise line length (default: 80).")
+    parser.add_argument("--wrap", type=int, default=DEFAULT_WRAP, help="Wrap width for tgpt prompt summaries (default: 120).")
+    parser.add_argument("--quiet", action="store_true", help="Suppress verbose prompt logging to stderr.")
+    parser.add_argument("--cache-only", action="store_true", help="Do not call tgpt; use cache or placeholder text.")
     args = parser.parse_args(argv)
 
     try:
-        feed = fetch_guardian()
+        feed = fetch_guardian(url=args.feed_url)
         all_articles = parse_rss(feed)
         articles = all_articles[: args.limit] if args.limit > 0 else all_articles
     except (HTTPError, URLError, TimeoutError) as exc:
@@ -406,9 +424,18 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"Unexpected error: {exc}\n")
         return 1
 
-    cache = load_cache(CACHE_PATH)
-    summaries = prepare_responses(articles, cache=cache, refresh=args.refresh)
-    save_cache(CACHE_PATH, cache)
+    cache = load_cache(args.cache_path)
+    summaries = prepare_responses(
+        articles,
+        cache=cache,
+        refresh=args.refresh,
+        tgpt_bin=args.tgpt_bin,
+        noise_len=args.noise_len,
+        wrap_width=args.wrap,
+        verbose=not args.quiet,
+        cache_only=args.cache_only,
+    )
+    save_cache(args.cache_path, cache)
 
     if not sys.stdout.isatty():
         # Non-interactive environments: print summaries and exit
@@ -418,7 +445,7 @@ def main(argv: list[str]) -> int:
     app = GuardianApp(
         limit=args.limit,
         refresh=args.refresh,
-        cache_path=CACHE_PATH,
+        cache_path=args.cache_path,
         articles=articles,
         summaries=summaries,
     )
