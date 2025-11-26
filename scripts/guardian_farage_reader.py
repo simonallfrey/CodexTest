@@ -80,7 +80,8 @@ def build_prompt(summary: str) -> str:
         random_noise(),
         (
             "summarise the following in the character of a far right british politician such as Nigel Farrage; "
-            "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences)"
+            "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
+            "no preamble—start directly with the summary"
         ),
         summary,
     ]
@@ -107,6 +108,10 @@ def call_tgpt(prompt: str, timeout: int = 45) -> str:
     lines = [ln for ln in result.stdout.splitlines() if "loading" not in ln.lower()]
     while lines and not lines[0].strip():
         lines.pop(0)
+    # Drop common meta preambles like "here's a summary"
+    while lines and re.match(r"(?i)here['’]s (a )?summary", lines[0].strip()):
+        lines.pop(0)
+
     response = "\n".join(lines).strip()
     return response or "(tgpt returned empty response)"
 
