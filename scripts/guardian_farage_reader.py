@@ -269,6 +269,8 @@ def render(
             resp_farage = cache[farage_key]
         else:
             prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
+            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
+            sys.stderr.flush()
             resp_farage = call_tgpt(prompt_f)
             cache[farage_key] = resp_farage
 
@@ -276,6 +278,8 @@ def render(
             resp_starmer = cache[starmer_key]
         else:
             prompt_s = build_prompt_starmer(" ".join(to_three_lines(article.summary, width=120)))
+            sys.stderr.write(f"Querying Starmer persona for: {article.title}\n")
+            sys.stderr.flush()
             resp_starmer = call_tgpt(prompt_s)
             cache[starmer_key] = resp_starmer
 
