@@ -270,6 +270,7 @@ def render(
         else:
             prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
             sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
+            sys.stderr.write(f"Prompt:\n{prompt_f}\n\n")
             sys.stderr.flush()
             resp_farage = call_tgpt(prompt_f)
             cache[farage_key] = resp_farage
@@ -279,6 +280,7 @@ def render(
         else:
             prompt_s = build_prompt_starmer(" ".join(to_three_lines(article.summary, width=120)))
             sys.stderr.write(f"Querying Starmer persona for: {article.title}\n")
+            sys.stderr.write(f"Prompt:\n{prompt_s}\n\n")
             sys.stderr.flush()
             resp_starmer = call_tgpt(prompt_s)
             cache[starmer_key] = resp_starmer
