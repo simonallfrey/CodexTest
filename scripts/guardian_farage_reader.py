@@ -202,6 +202,11 @@ def prepare_responses(
     return results
 
 
+def color(text: str, code: str, enabled: bool) -> str:
+    """Optional ANSI coloring when stdout is a TTY."""
+    return f"\033[{code}m{text}\033[0m" if enabled else text
+
+
 def render_noninteractive(
     articles: Sequence[Article],
     responses: Sequence[str],
