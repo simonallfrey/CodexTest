@@ -99,7 +99,7 @@ def build_prompt(summary: str) -> str:
     """Construct the prompt passed to tgpt (Farage style)."""
     parts = [
         "ignore the next line",
-        random_noise(),
+        random_noise(80),
         PROMPT_INSTRUCTION,
         summary,
     ]
@@ -110,7 +110,7 @@ def build_prompt_starmer(summary: str) -> str:
     """Construct the prompt passed to tgpt (Starmer style)."""
     parts = [
         "ignore the next line",
-        random_noise(),
+        random_noise(80),
         PROMPT_INSTRUCTION_STARMER,
         summary,
     ]
