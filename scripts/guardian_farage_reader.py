@@ -37,8 +37,8 @@ PROMPT_INSTRUCTION = (
 )
 PROMPT_INSTRUCTION_STARMER = (
     "summarise the following in the character of a centre-left British politician such as Keir Starmer; "
-    "measured, pragmatic tone; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
-    "no preamble—start directly with the summary"
+    "measured, pragmatic tone; no jokes or memes; no meta talk; no labels or prefaces; "
+    "no quotation marks; keep it concise (3-5 sentences); start directly with the summary"
 )
 
 
@@ -122,7 +122,7 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
     filtered = [ln for ln in lines if "loading" not in ln.lower()]
     while filtered and not filtered[0].strip():
         filtered.pop(0)
-    while filtered and re.match(r"(?i)here['’]s (a )?summary", filtered[0].strip()):
+    while filtered and re.match(r"(?i)(here['’]s (a )?summary|here['’]s (a )?view)", filtered[0].strip()):
         filtered.pop(0)
     return filtered
 
