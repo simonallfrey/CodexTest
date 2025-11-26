@@ -35,11 +35,6 @@ PROMPT_INSTRUCTION = (
     "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
     "no preamble—start directly with the summary"
 )
-PROMPT_INSTRUCTION_STARMER = (
-    "summarise the following in the character of a centre-left British politician such as Keir Starmer; "
-    "measured, pragmatic tone; no jokes or memes; no meta talk; no labels or prefaces; "
-    "no quotation marks; keep it concise (3-5 sentences); start directly with the summary"
-)
 
 
 @dataclass(frozen=True)
@@ -95,18 +90,12 @@ def random_noise(length: int = 16) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-def build_dual_prompt(summary: str) -> str:
-    """Construct a single prompt requesting both personas, delimited for parsing."""
+def build_prompt(summary: str) -> str:
+    """Construct the prompt passed to tgpt (Farage style only)."""
     parts = [
         "ignore the next line",
         random_noise(80),
-        (
-            "Provide two concise summaries (3-5 sentences each) of the following text. "
-            "First write in the voice of a far-right British politician (e.g., Nigel Farrage) under the marker '===FARAGE==='. "
-            "Then write in the voice of a centre-left British politician (e.g., Keir Starmer) under the marker '===STARMER==='. "
-            "Skip all meta-talk or commentary; do not include any other text, introductions, or labels. Format exactly:\n"
-            "===FARAGE===\n<farage summary>\n===STARMER===\n<starmer summary>"
-        ),
+        PROMPT_INSTRUCTION,
         summary,
     ]
     return "\n".join(parts)
@@ -120,24 +109,6 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
     while filtered and re.match(r"(?i)(here['’]s (a )?summary|here['’]s (a )?view)", filtered[0].strip()):
         filtered.pop(0)
     return filtered
-
-
-def parse_dual_response(text: str) -> tuple[str, str]:
-    """Extract Farage and Starmer sections from a delimited response."""
-    farage, starmer = "", ""
-    lower = text.lower()
-    if "===farage===" in lower and "===starmer===" in lower:
-        # split on markers case-insensitively
-        parts = re.split(r"===farage===|\s*===starmer===\s*", text, flags=re.IGNORECASE)
-        # re.split yields ['', before, between, after] depending on text; pick non-empty
-        non_empty = [p.strip() for p in parts if p.strip()]
-        if len(non_empty) >= 2:
-            farage, starmer = non_empty[0], non_empty[1]
-    if not farage:
-        farage = text.strip()
-    if not starmer:
-        starmer = text.strip()
-    return farage, starmer
 
 
 def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
@@ -266,33 +237,27 @@ def render(
     cache_path: Path,
     refresh: bool,
 ) -> None:
-    """Render headlines with two persona summaries and interactive paging."""
+    """Render headlines with Farage summaries and interactive paging."""
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
-    # Prepare responses (respect cache) with a single tgpt call per article
+    # Prepare responses (respect cache)
     responses_farage: List[str] = []
-    responses_starmer: List[str] = []
     for article in capped:
         key = article_key(article)
         farage_key = f"{key}:farage"
-        starmer_key = f"{key}:starmer"
 
-        if not refresh and farage_key in cache and starmer_key in cache:
+        if not refresh and farage_key in cache:
             resp_farage = cache[farage_key]
-            resp_starmer = cache[starmer_key]
         else:
-            prompt_dual = build_dual_prompt(" ".join(to_three_lines(article.summary, width=120)))
-            sys.stderr.write(f"Querying combined personas for: {article.title}\n")
-            sys.stderr.write(f"Prompt:\n{prompt_dual}\n\n")
+            prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
+            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
+            sys.stderr.write(f"Prompt:\n{prompt_f}\n\n")
             sys.stderr.flush()
-            combined = call_tgpt(prompt_dual)
-            resp_farage, resp_starmer = parse_dual_response(combined)
+            resp_farage = call_tgpt(prompt_f)
             cache[farage_key] = resp_farage
-            cache[starmer_key] = resp_starmer
 
         responses_farage.append(resp_farage)
-        responses_starmer.append(resp_starmer)
 
     # Persist cache regardless of rendering mode
     save_cache(cache_path, cache)
@@ -302,15 +267,9 @@ def render(
         print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
         print(f"Source: {GUARDIAN_URL}")
         print(f"Limit: {len(capped)} articles\n")
-        for idx, (article, resp_f, resp_s) in enumerate(
-            zip(capped, responses_farage, responses_starmer), start=1
-        ):
+        for idx, (article, resp_f) in enumerate(zip(capped, responses_farage), start=1):
             print(color(f"### {idx}. {article.title}", "92;1", use_color))
-            print(color("Farage:", "91;1", use_color))
             print(resp_f)
-            print("")
-            print(color("Starmer:", "94;1", use_color))
-            print(resp_s)
             print("\n---\n")
         return
 
@@ -333,20 +292,11 @@ def render(
             body = titles_page
             footer = f"-- Titles page (1 of {total_articles + 1}) -- [Enter/space/n/j: next, q: quit] "
         else:
-            combined_response = (
-                color("Farage:", "91;1", use_color)
-                + "\n"
-                + responses_farage[idx]
-                + "\n\n"
-                + color("Starmer:", "94;1", use_color)
-                + "\n"
-                + responses_starmer[idx]
-            )
             page_text = build_page_text(
                 idx=idx + 1,
                 total=total_articles,
                 article=capped[idx],
-                response=combined_response,
+                response=responses_farage[idx],
                 term_cols=term.columns,
                 term_lines=term.lines,
                 use_color=use_color,
