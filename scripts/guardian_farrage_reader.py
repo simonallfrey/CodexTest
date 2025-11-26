@@ -24,10 +24,11 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from textwrap import wrap
 from typing import Dict, Iterable, List, Sequence
@@ -36,11 +37,13 @@ from urllib.request import Request, urlopen
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
+from textual.containers import Horizontal
+from textual.message import Message
+from textual.reactive import reactive
+from textual.screen import Screen
+from textual.widgets import Footer, Header, Input, ListItem, ListView, LoadingIndicator, Static
 
-import subprocess
-
-# Configuration
+# Configuration defaults (overridable by env/CLI)
 ENV_TGPT_BIN = os.getenv("TGPT_BIN", "/usr/local/bin/tgpt")
 ENV_FEED_URL = os.getenv("GUARDIAN_FEED_URL", "https://www.theguardian.com/international/rss")
 ENV_CACHE = Path(os.getenv("GUARDIAN_CACHE_PATH", ".guardian_farage_cache.json"))
@@ -54,7 +57,28 @@ PROMPT_INSTRUCTION = (
 )
 
 
-# Data models
+# HTML stripping helper
+class PlaintextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: List[str] = []
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.chunks.append(data)
+
+    def get_text(self) -> str:
+        text = " ".join(self.chunks)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+
+def strip_html(html: str) -> str:
+    parser = PlaintextParser()
+    parser.feed(html)
+    return parser.get_text()
+
+
 @dataclass(frozen=True)
 class Article:
     title: str
@@ -73,13 +97,6 @@ def fetch_guardian(url: str, timeout: int = 10) -> str:
         return resp.read().decode(charset, errors="replace")
 
 
-def clean_text(html_text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", html_text)
-    text = unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
 def parse_rss(xml_text: str) -> List[Article]:
     root = ET.fromstring(xml_text)
     articles: List[Article] = []
@@ -88,7 +105,7 @@ def parse_rss(xml_text: str) -> List[Article]:
         description = item.findtext("description") or ""
         if not title:
             continue
-        articles.append(Article(title=clean_text(title), summary=clean_text(description)))
+        articles.append(Article(title=strip_html(title), summary=strip_html(description)))
     return articles
 
 
@@ -126,7 +143,7 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
 
 def call_tgpt(prompt: str, bin_path: str, timeout: int = 45) -> str:
     if not os.path.exists(bin_path):
-        return "(tgpt binary not found at /usr/local/bin/tgpt)"
+        return "(tgpt binary not found at provided path)"
     try:
         result = subprocess.run(
             [bin_path, prompt],
@@ -170,59 +187,6 @@ def save_cache(path: Path, cache: Dict[str, str]) -> None:
         pass
 
 
-def prepare_responses(
-    articles: Sequence[Article],
-    cache: Dict[str, str],
-    refresh: bool,
-    tgpt_bin: str,
-    noise_len: int,
-    wrap_width: int,
-    verbose: bool,
-    cache_only: bool,
-) -> List[str]:
-    """Return Farage-styled responses for each article, populating cache."""
-    results: List[str] = []
-    for article in articles:
-        key = f"{article_key(article)}:farage"
-        if not refresh and key in cache:
-            results.append(cache[key])
-            continue
-        if cache_only:
-            results.append("(cache-only mode: no summary available)")
-            continue
-
-        prompt = build_prompt(to_three_lines(article.summary, width=wrap_width), noise_len=noise_len)
-        if verbose:
-            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
-            sys.stderr.write(f"Prompt:\n{prompt}\n\n")
-            sys.stderr.flush()
-        response = call_tgpt(prompt, bin_path=tgpt_bin)
-        cache[key] = response
-        results.append(response)
-    return results
-
-
-def color(text: str, code: str, enabled: bool) -> str:
-    """Optional ANSI coloring when stdout is a TTY."""
-    return f"\033[{code}m{text}\033[0m" if enabled else text
-
-
-def render_noninteractive(
-    articles: Sequence[Article],
-    responses: Sequence[str],
-    use_color: bool,
-    source: str,
-) -> None:
-    """Print all summaries sequentially (no paging)."""
-    print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-    print(f"Source: {source}")
-    print(f"Limit: {len(articles)} articles\n")
-    for idx, (article, response) in enumerate(zip(articles, responses), start=1):
-        print(color(f"### {idx}. {article.title}", "92;1", use_color))
-        print(response)
-        print("\n---\n")
-
-
 def find_match(
     query: str,
     titles: Sequence[str],
@@ -243,91 +207,67 @@ def find_match(
     return None
 
 
-# Textual UI
-class GuardianApp(App[None]):
-    CSS = """
-    Screen {
-        layout: vertical;
-    }
-    Input {
-        dock: bottom;
-        display: none;
-    }
-    """
-
-    BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("/", "search", "Search"),
-        ("n", "search_next", "Next match"),
-        ("N", "search_prev", "Prev match"),
-        ("G", "last_article", "Last article"),
-    ]
-
-    def __init__(
-        self,
-        limit: int,
-        refresh: bool,
-        cache_path: Path,
-        articles: list[Article] | None = None,
-        summaries: list[str] | None = None,
-    ) -> None:
+# Messages for background updates
+class ArticlesLoaded(Message):
+    def __init__(self, articles: list[Article]) -> None:
+        self.articles = articles
         super().__init__()
-        self.limit = limit
-        self.refresh = refresh
-        self.cache_path = cache_path
-        self.input_active = False
-        self.initial_articles = articles or []
-        self.initial_summaries = summaries or []
-        self.articles: list[Article] = []
-        self.summaries: list[str] = []
-        self.matches_query: str | None = None
-        self.current_index: int = 0
-        self.showing_overview: bool = True
-        self._pending_g: bool = False
+
+
+class SummaryReady(Message):
+    def __init__(self, index: int, summary: str) -> None:
+        self.index = index
+        self.summary = summary
+        super().__init__()
+
+
+# Screens
+class HeadlinesScreen(Screen):
+    BINDINGS = [
+        ("q", "app.quit", "Quit"),
+        ("/", "search", "Search"),
+        ("n", "search_next", "Next"),
+        ("N", "search_prev", "Prev"),
+        ("G", "last_article", "Last"),
+    ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield ListView(id="list")
-        yield Input(placeholder="Search...", id="search_input")
+        with Horizontal():
+            self.list_view = ListView(id="headlines")
+            self.loading = LoadingIndicator(id="loading", classes="hidden")
+            container = Static()
+            container.update(self.loading)
+            yield self.list_view
+        yield Input(placeholder="Search...", id="search_input", classes="hidden")
         yield Footer()
 
-    async def on_mount(self) -> None:
-        # Data is pre-fetched before launching the TUI.
-        self.articles = self.initial_articles
-        self.summaries = self.initial_summaries
-        self.render_overview()
+    def on_mount(self) -> None:
+        self.matches_query: str | None = None
+        self.pending_g = False
 
-    def render_overview(self) -> None:
-        """Show overview page with all titles."""
-        self.showing_overview = True
-        list_view = self.query_one(ListView)
-        list_view.clear()
-        titles = "\n".join(f"{idx+1}. {article.title}" for idx, article in enumerate(self.articles))
-        list_view.append(ListItem(Static(f"[b]Guardian Headlines[/b]\n{titles}")))
-        list_view.index = 0
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.index
+        # index corresponds to article index
+        self.app.push_screen(ArticleScreen(index))
 
-    def show_article(self, index: int) -> None:
-        if not self.articles:
-            return
-        index = max(0, min(index, len(self.articles) - 1))
-        self.current_index = index
-        self.showing_overview = False
-        body = f"[b]{self.articles[index].title}[/b]\n\n{self.summaries[index]}"
-        list_view = self.query_one(ListView)
-        list_view.clear()
-        list_view.append(ListItem(Static(body)))
-        list_view.index = 0
-
-    def action_quit(self) -> None:
-        self.exit()
+    def action_last_article(self) -> None:
+        if self.app.articles:
+            self.app.push_screen(ArticleScreen(len(self.app.articles) - 1))
 
     def action_search(self) -> None:
         search_input = self.query_one("#search_input", Input)
-        search_input.display = True
+        search_input.remove_class("hidden")
         search_input.value = ""
         search_input.focus()
-        self.input_active = True
-        self._pending_g = False
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        event.input.add_class("hidden")
+        if not query:
+            return
+        self.matches_query = query
+        self._jump_match(direction=1)
 
     def action_search_next(self) -> None:
         self._jump_match(direction=1)
@@ -336,71 +276,243 @@ class GuardianApp(App[None]):
         self._jump_match(direction=-1)
 
     def _jump_match(self, direction: int) -> None:
-        if not self.matches_query:
+        if not self.matches_query or not self.app.articles:
             return
         found = find_match(
             self.matches_query,
-            [a.title for a in self.articles],
-            self.summaries,
-            self.current_index,
+            [a.title for a in self.app.articles],
+            [self.app.summaries.get(i, "") for i in range(len(self.app.articles))],
+            self.app.current_index,
             direction=direction,
         )
         if found is not None:
-            self.show_article(found)
-
-    def action_last_article(self) -> None:
-        if self.articles:
-            self.show_article(len(self.articles) - 1)
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        # If selecting the first overview item, ignore; otherwise show selected article.
-        if event.index == 0:
-            return
-        self.show_article(event.index - 1)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        query = event.value.strip()
-        event.input.display = False
-        self.input_active = False
-        self._pending_g = False
-        if not query:
-            return
-        self.matches_query = query
-        found = find_match(
-            query,
-            [a.title for a in self.articles],
-            self.summaries,
-            self.current_index,
-            direction=1,
-        )
-        if found is not None:
-            self.show_article(found)
+            self.app.current_index = found
+            self.app.push_screen(ArticleScreen(found))
 
     def on_key(self, event: events.Key) -> None:
-        # Preserve j/k navigation even when not bound explicitly
-        if self.input_active:
-            return
         if event.key == "g":
-            if self._pending_g:
-                self.render_overview()
-                self._pending_g = False
+            if self.pending_g:
+                # gg -> go to first article
+                if self.app.articles:
+                    self.app.push_screen(ArticleScreen(0))
+                self.pending_g = False
             else:
-                self._pending_g = True
+                self.pending_g = True
             return
-        self._pending_g = False
+        self.pending_g = False
 
         if event.key in {"j", "down"}:
-            if self.showing_overview:
-                self.show_article(0)
-            else:
-                self.show_article(self.current_index + 1)
+            if self.app.articles:
+                next_idx = min(len(self.app.articles) - 1, self.app.current_index + 1)
+                self.app.current_index = next_idx
+                self.app.push_screen(ArticleScreen(next_idx))
         elif event.key in {"k", "up"}:
-            if self.showing_overview:
-                self.render_overview()
-            elif self.current_index == 0:
-                self.render_overview()
+            if self.app.articles:
+                prev_idx = max(0, self.app.current_index - 1)
+                self.app.current_index = prev_idx
+                self.app.push_screen(ArticleScreen(prev_idx))
+
+
+class ArticleScreen(Screen):
+    BINDINGS = [
+        ("q", "pop_screen", "Back"),
+        ("esc", "pop_screen", "Back"),
+        ("j", "next_article", "Next"),
+        ("k", "prev_article", "Prev"),
+        ("G", "last_article", "Last"),
+        ("g", "maybe_top", "Top"),
+        ("/", "search", "Search"),
+        ("n", "search_next", "Next"),
+        ("N", "search_prev", "Prev"),
+    ]
+
+    def __init__(self, index: int) -> None:
+        super().__init__()
+        self.index = index
+        self.pending_g = False
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        self.body = Static()
+        yield self.body
+        yield Footer()
+
+    def on_show(self) -> None:
+        self.pending_g = False
+        self.render_article()
+
+    def render_article(self) -> None:
+        articles = self.app.articles
+        if not articles:
+            self.body.update("No articles loaded.")
+            return
+        idx = max(0, min(self.index, len(articles) - 1))
+        self.app.current_index = idx
+        title = articles[idx].title
+        summary = self.app.summaries.get(idx, "(summary loading...)")
+        self.body.update(f"[b]{title}[/b]\n\n{summary}")
+
+    def action_pop_screen(self) -> None:
+        self.app.pop_screen()
+
+    def action_next_article(self) -> None:
+        if self.app.articles and self.index + 1 < len(self.app.articles):
+            self.index += 1
+            self.render_article()
+
+    def action_prev_article(self) -> None:
+        if self.app.articles and self.index > 0:
+            self.index -= 1
+            self.render_article()
+        elif self.index == 0:
+            self.app.pop_screen()
+
+    def action_last_article(self) -> None:
+        if self.app.articles:
+            self.index = len(self.app.articles) - 1
+            self.render_article()
+
+    def action_maybe_top(self) -> None:
+        if self.pending_g:
+            if self.app.articles:
+                self.index = 0
+                self.render_article()
+            self.pending_g = False
+        else:
+            self.pending_g = True
+
+    def action_search(self) -> None:
+        # delegate to headlines search (push screen to handle search input)
+        self.app.pop_screen()
+        self.app.push_screen("headlines")
+        headlines = self.app.get_screen("headlines")
+        if isinstance(headlines, HeadlinesScreen):
+            headlines.action_search()
+
+    def action_search_next(self) -> None:
+        self._jump(direction=1)
+
+    def action_search_prev(self) -> None:
+        self._jump(direction=-1)
+
+    def _jump(self, direction: int) -> None:
+        query = self.app.matches_query
+        if not query or not self.app.articles:
+            return
+        found = find_match(
+            query,
+            [a.title for a in self.app.articles],
+            [self.app.summaries.get(i, "") for i in range(len(self.app.articles))],
+            self.app.current_index,
+            direction=direction,
+        )
+        if found is not None:
+            self.index = found
+            self.render_article()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "g":
+            self.action_maybe_top()
+        else:
+            self.pending_g = False
+
+
+# Application
+class GuardianApp(App[None]):
+    CSS_PATH = None  # inline CSS used
+    SCREENS = {"headlines": HeadlinesScreen}
+
+    articles: reactive[list[Article]] = reactive([])
+    summaries: reactive[Dict[int, str]] = reactive({})
+    matches_query: reactive[str | None] = reactive(None)
+    current_index: reactive[int] = reactive(0)
+
+    def __init__(
+        self,
+        feed_url: str,
+        tgpt_bin: str,
+        cache_path: Path,
+        noise_len: int,
+        wrap_width: int,
+        refresh: bool,
+        quiet: bool,
+        cache_only: bool,
+    ) -> None:
+        super().__init__()
+        self.feed_url = feed_url
+        self.tgpt_bin = tgpt_bin
+        self.cache_path = cache_path
+        self.noise_len = noise_len
+        self.wrap_width = wrap_width
+        self.refresh = refresh
+        self.quiet = quiet
+        self.cache_only = cache_only
+        self.cache: Dict[str, str] = load_cache(cache_path)
+
+    def compose(self) -> ComposeResult:
+        yield HeadlinesScreen()
+
+    def on_mount(self) -> None:
+        # start background fetch immediately
+        self.call_later(self._show_loading)
+        self.run_worker(self._load_feed(), thread=True, exclusive=True)
+
+    def _show_loading(self) -> None:
+        screen = self.get_screen("headlines")
+        if isinstance(screen, HeadlinesScreen):
+            screen.list_view.clear()
+            screen.list_view.append(ListItem(LoadingIndicator()))
+
+    def on_articles_loaded(self, message: ArticlesLoaded) -> None:
+        self.articles = message.articles
+        self.summaries = {idx: self.cache.get(f"{article_key(a)}:farage", "") for idx, a in enumerate(self.articles)}
+        screen = self.get_screen("headlines")
+        if isinstance(screen, HeadlinesScreen):
+            screen.list_view.clear()
+            for idx, article in enumerate(self.articles):
+                screen.list_view.append(ListItem(Static(f"{idx+1}. {article.title}")))
+        # start summaries in background
+        self.run_worker(self._generate_summaries(), thread=True, exclusive=True)
+
+    def on_summary_ready(self, message: SummaryReady) -> None:
+        self.summaries = {**self.summaries, message.index: message.summary}
+        cache_key = f"{article_key(self.articles[message.index])}:farage"
+        self.cache[cache_key] = message.summary
+        save_cache(self.cache_path, self.cache)
+        # if article screen open and same index, refresh
+        current = self.screen
+        if isinstance(current, ArticleScreen) and current.index == message.index:
+            current.render_article()
+
+    async def _load_feed(self):
+        try:
+            feed = fetch_guardian(url=self.feed_url)
+            all_articles = parse_rss(feed)
+        except Exception as exc:
+            self.exit(f"Failed to load feed: {exc}")
+            return
+        articles = all_articles
+        self.post_message(ArticlesLoaded(articles))
+
+    async def _generate_summaries(self):
+        if not self.articles:
+            return
+        for idx, article in enumerate(self.articles):
+            key = f"{article_key(article)}:farage"
+            if not self.refresh and key in self.cache:
+                summary = self.cache[key]
+            elif self.cache_only:
+                summary = "(cache-only mode: no summary available)"
             else:
-                self.show_article(self.current_index - 1)
+                prompt = build_prompt(to_three_lines(article.summary, width=self.wrap_width), noise_len=self.noise_len)
+                if not self.quiet:
+                    self.console.print(f"[cyan]Querying tgpt for:[/cyan] {article.title}")
+                    self.console.print(f"[dim]{prompt}[/dim]\n")
+                summary = call_tgpt(prompt, bin_path=self.tgpt_bin)
+            self.post_message(SummaryReady(idx, summary))
+
+    def action_quit(self) -> None:
+        self.exit()
 
 
 def main(argv: list[str]) -> int:
@@ -416,44 +528,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--cache-only", action="store_true", help="Do not call tgpt; use cache or placeholder text.")
     args = parser.parse_args(argv)
 
-    try:
-        feed = fetch_guardian(url=args.feed_url)
-        all_articles = parse_rss(feed)
-        articles = all_articles[: args.limit] if args.limit > 0 else all_articles
-    except (HTTPError, URLError, TimeoutError) as exc:
-        sys.stderr.write(f"Network error: {exc}\n")
-        return 1
-    except ET.ParseError as exc:
-        sys.stderr.write(f"Failed to parse RSS feed: {exc}\n")
-        return 1
-    except Exception as exc:
-        sys.stderr.write(f"Unexpected error: {exc}\n")
-        return 1
-
-    cache = load_cache(args.cache_path)
-    summaries = prepare_responses(
-        articles,
-        cache=cache,
-        refresh=args.refresh,
+    app = GuardianApp(
+        feed_url=args.feed_url,
         tgpt_bin=args.tgpt_bin,
+        cache_path=args.cache_path,
         noise_len=args.noise_len,
         wrap_width=args.wrap,
-        verbose=not args.quiet,
-        cache_only=args.cache_only,
-    )
-    save_cache(args.cache_path, cache)
-
-    if not sys.stdout.isatty():
-        # Non-interactive environments: print summaries and exit
-        render_noninteractive(articles, summaries, use_color=False, source=args.feed_url)
-        return 0
-
-    app = GuardianApp(
-        limit=args.limit,
         refresh=args.refresh,
-        cache_path=args.cache_path,
-        articles=articles,
-        summaries=summaries,
+        quiet=args.quiet,
+        cache_only=args.cache_only,
     )
     app.run()
     return 0
