@@ -232,6 +232,10 @@ class GuardianApp(App[None]):
     Screen {
         layout: vertical;
     }
+    Input {
+        dock: bottom;
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -239,6 +243,7 @@ class GuardianApp(App[None]):
         ("/", "search", "Search"),
         ("n", "search_next", "Next match"),
         ("N", "search_prev", "Prev match"),
+        ("G", "last_article", "Last article"),
     ]
 
     def __init__(
@@ -261,6 +266,8 @@ class GuardianApp(App[None]):
         self.summaries: list[str] = []
         self.matches_query: str | None = None
         self.current_index: int = 0
+        self.showing_overview: bool = True
+        self._pending_g: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -272,20 +279,28 @@ class GuardianApp(App[None]):
         # Data is pre-fetched before launching the TUI.
         self.articles = self.initial_articles
         self.summaries = self.initial_summaries
+        self.render_overview()
+
+    def render_overview(self) -> None:
+        """Show overview page with all titles."""
+        self.showing_overview = True
         list_view = self.query_one(ListView)
         list_view.clear()
-        # Initial page: overview of all titles
         titles = "\n".join(f"{idx+1}. {article.title}" for idx, article in enumerate(self.articles))
         list_view.append(ListItem(Static(f"[b]Guardian Headlines[/b]\n{titles}")))
+        list_view.index = 0
 
     def show_article(self, index: int) -> None:
         if not self.articles:
             return
         index = max(0, min(index, len(self.articles) - 1))
         self.current_index = index
+        self.showing_overview = False
         body = f"[b]{self.articles[index].title}[/b]\n\n{self.summaries[index]}"
-        self.query_one(ListView).clear()
-        self.query_one(ListView).append(ListItem(Static(body)))
+        list_view = self.query_one(ListView)
+        list_view.clear()
+        list_view.append(ListItem(Static(body)))
+        list_view.index = 0
 
     def action_quit(self) -> None:
         self.exit()
@@ -296,6 +311,7 @@ class GuardianApp(App[None]):
         search_input.value = ""
         search_input.focus()
         self.input_active = True
+        self._pending_g = False
 
     def action_search_next(self) -> None:
         self._jump_match(direction=1)
@@ -316,6 +332,10 @@ class GuardianApp(App[None]):
         if found is not None:
             self.show_article(found)
 
+    def action_last_article(self) -> None:
+        if self.articles:
+            self.show_article(len(self.articles) - 1)
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         # If selecting the first overview item, ignore; otherwise show selected article.
         if event.index == 0:
@@ -326,6 +346,7 @@ class GuardianApp(App[None]):
         query = event.value.strip()
         event.input.display = False
         self.input_active = False
+        self._pending_g = False
         if not query:
             return
         self.matches_query = query
@@ -343,9 +364,23 @@ class GuardianApp(App[None]):
         # Preserve j/k navigation even when not bound explicitly
         if self.input_active:
             return
+        if event.key == "g":
+            if self._pending_g:
+                self.render_overview()
+                self._pending_g = False
+            else:
+                self._pending_g = True
+            return
+        self._pending_g = False
+
         if event.key in {"j", "down"}:
-            self.show_article(self.current_index + 1)
+            if self.showing_overview:
+                self.show_article(0)
+            else:
+                self.show_article(self.current_index + 1)
         elif event.key in {"k", "up"}:
+            if self.showing_overview:
+                return
             self.show_article(self.current_index - 1)
 
 
