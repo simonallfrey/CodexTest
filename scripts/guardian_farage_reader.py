@@ -36,7 +36,6 @@ import xml.etree.ElementTree as ET
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 import subprocess
@@ -228,32 +227,10 @@ def find_match(
 
 
 # Textual UI
-class SummaryView(Static):
-    """Displays a single article summary."""
-
-    def update_content(self, title: str, body: str) -> None:
-        self.update(f"[b]{title}[/b]\n\n{body}")
-
-
 class GuardianApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
-    }
-    Horizontal {
-        height: 1fr;
-    }
-    ListView {
-        width: 40%;
-        border: tall $primary;
-    }
-    SummaryView {
-        border: tall $primary;
-        padding: 1 2;
-    }
-    Input {
-        dock: bottom;
-        display: none;
     }
     """
 
@@ -287,9 +264,7 @@ class GuardianApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Horizontal():
-            yield ListView(id="list")
-            yield SummaryView(id="summary")
+        yield ListView(id="list")
         yield Input(placeholder="Search...", id="search_input")
         yield Footer()
 
@@ -299,20 +274,18 @@ class GuardianApp(App[None]):
         self.summaries = self.initial_summaries
         list_view = self.query_one(ListView)
         list_view.clear()
-        for idx, article in enumerate(self.articles):
-            list_view.append(ListItem(Static(f"{idx+1}. {article.title}")))
-        if self.articles:
-            self.show_article(0)
+        # Initial page: overview of all titles
+        titles = "\n".join(f"{idx+1}. {article.title}" for idx, article in enumerate(self.articles))
+        list_view.append(ListItem(Static(f"[b]Guardian Headlines[/b]\n{titles}")))
 
     def show_article(self, index: int) -> None:
         if not self.articles:
             return
         index = max(0, min(index, len(self.articles) - 1))
         self.current_index = index
-        self.query_one(ListView).index = index
-        self.query_one(SummaryView).update_content(
-            self.articles[index].title, self.summaries[index]
-        )
+        body = f"[b]{self.articles[index].title}[/b]\n\n{self.summaries[index]}"
+        self.query_one(ListView).clear()
+        self.query_one(ListView).append(ListItem(Static(body)))
 
     def action_quit(self) -> None:
         self.exit()
@@ -344,7 +317,10 @@ class GuardianApp(App[None]):
             self.show_article(found)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        self.show_article(event.index)
+        # If selecting the first overview item, ignore; otherwise show selected article.
+        if event.index == 0:
+            return
+        self.show_article(event.index - 1)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
