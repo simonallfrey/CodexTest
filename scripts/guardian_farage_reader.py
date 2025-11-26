@@ -78,7 +78,10 @@ def build_prompt(summary: str) -> str:
     parts = [
         "ignore the next line",
         random_noise(),
-        "summarise the following in the character of a far right british politician such as Nigel Farrage",
+        (
+            "summarise the following in the character of a far right british politician such as Nigel Farrage; "
+            "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences)"
+        ),
         summary,
     ]
     return "\n".join(parts)
@@ -100,7 +103,12 @@ def call_tgpt(prompt: str, timeout: int = 45) -> str:
     if result.returncode != 0:
         err = result.stderr.strip() or result.stdout.strip()
         return f"(tgpt returned non-zero exit code {result.returncode}: {err})"
-    return result.stdout.strip() or "(tgpt returned empty response)"
+
+    lines = [ln for ln in result.stdout.splitlines() if "loading" not in ln.lower()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    response = "\n".join(lines).strip()
+    return response or "(tgpt returned empty response)"
 
 
 def color(text: str, code: str, enabled: bool) -> str:
