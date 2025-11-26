@@ -1,34 +1,53 @@
 #!/usr/bin/env python3
 """
-Guardian reader that rewrites article summaries in the voice of a far-right British
-politician using the local `tgpt` client. Designed as clean, readable reference Python.
+Guardian headlines reader rendered with Textual.
+
+Behavior
+- Fetches Guardian RSS headlines and summaries.
+- Builds a Farage-style summary via a single tgpt prompt per article (cached).
+- Presents a split-view TUI: headlines list (left) and summary pane (right).
+- Searching: press "/" to enter a query; "n"/"N" to jump next/previous match.
+- Navigation: arrow keys or j/k to move; Enter/space to open selection.
+
+Requirements
+- Python 3.10+
+- textual >= 0.40 (install via `pip install textual`)
+- Network access for RSS and tgpt.
+- `/usr/local/bin/tgpt` available.
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import re
 import secrets
-import shutil
-import subprocess
 import sys
-import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import wrap
 from typing import Dict, Iterable, List, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-import xml.etree.ElementTree as ET
 from html import unescape
 
+from textual import events
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
+
+import subprocess
+import xml.etree.ElementTree as ET
+
+# Configuration
 TGPT_BIN = "/usr/local/bin/tgpt"
 GUARDIAN_URL = "https://www.theguardian.com/international/rss"
-DEFAULT_LIMIT = 10
 CACHE_PATH = Path(".guardian_farage_cache.json")
+DEFAULT_LIMIT = 30
 PROMPT_INSTRUCTION = (
     "summarise the following in the character of a far right british politician such as Nigel Farrage; "
     "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
@@ -36,14 +55,15 @@ PROMPT_INSTRUCTION = (
 )
 
 
+# Data models
 @dataclass(frozen=True)
 class Article:
     title: str
     summary: str
 
 
+# Data helpers
 def fetch_guardian(url: str = GUARDIAN_URL, timeout: int = 10) -> str:
-    """Download the Guardian RSS feed."""
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; GuardianHeadlineFetcher/1.0)",
         "Accept": "application/rss+xml, text/xml;q=0.9, */*;q=0.8",
@@ -55,7 +75,6 @@ def fetch_guardian(url: str = GUARDIAN_URL, timeout: int = 10) -> str:
 
 
 def clean_text(html_text: str) -> str:
-    """Strip tags and decode entities for a plain-text summary."""
     text = re.sub(r"<[^>]+>", " ", html_text)
     text = unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -63,7 +82,6 @@ def clean_text(html_text: str) -> str:
 
 
 def parse_rss(xml_text: str) -> List[Article]:
-    """Parse RSS XML into Article objects."""
     root = ET.fromstring(xml_text)
     articles: List[Article] = []
     for item in root.findall("./channel/item"):
@@ -75,33 +93,30 @@ def parse_rss(xml_text: str) -> List[Article]:
     return articles
 
 
-def to_three_lines(text: str, width: int = 80) -> List[str]:
-    """Wrap text to at most three lines for brevity."""
+def to_three_lines(text: str, width: int = 80) -> str:
     if not text:
-        return ["(no summary available)"]
+        return "(no summary available)"
     wrapped = wrap(text, width=width)
-    return wrapped[:3] or ["(no summary available)"]
+    return " ".join(wrapped[:3])
 
 
-def random_noise(length: int = 16) -> str:
-    """Return a line of random characters to precede the instruction."""
+def random_noise(length: int = 80) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def build_prompt(summary: str) -> str:
-    """Construct the prompt passed to tgpt (Farage style only)."""
-    parts = [
-        "ignore the next line",
-        random_noise(80),
-        PROMPT_INSTRUCTION,
-        summary,
-    ]
-    return "\n".join(parts)
+    return "\n".join(
+        [
+            "ignore the next line",
+            random_noise(80),
+            PROMPT_INSTRUCTION,
+            summary,
+        ]
+    )
 
 
 def strip_meta_lines(lines: Iterable[str]) -> List[str]:
-    """Remove spinner/meta lines and leading boilerplate."""
     filtered = [ln for ln in lines if "loading" not in ln.lower()]
     while filtered and not filtered[0].strip():
         filtered.pop(0)
@@ -111,10 +126,8 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
 
 
 def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
-    """Call tgpt with the given prompt and return cleaned text."""
     if not os.path.exists(bin_path):
         return "(tgpt binary not found at /usr/local/bin/tgpt)"
-
     try:
         result = subprocess.run(
             [bin_path, prompt],
@@ -125,35 +138,19 @@ def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
         )
     except Exception as exc:
         return f"(tgpt failed: {exc})"
-
     if result.returncode != 0:
         err = result.stderr.strip() or result.stdout.strip()
         return f"(tgpt returned non-zero exit code {result.returncode}: {err})"
-
     lines = strip_meta_lines(result.stdout.splitlines())
     response = "\n".join(lines).strip()
     return response or "(tgpt returned empty response)"
 
 
-def color(text: str, code: str, enabled: bool) -> str:
-    """Optional ANSI coloring when stdout is a TTY."""
-    return f"\033[{code}m{text}\033[0m" if enabled else text
-
-
-def log_status(message: str) -> None:
-    """Emit a status line to stderr."""
-    sys.stderr.write(f"{message}\n")
-    sys.stderr.flush()
-
-
 def article_key(article: Article) -> str:
-    """Stable key for caching per-article responses."""
-    digest = hashlib.sha256(f"{article.title}|{article.summary}".encode("utf-8")).hexdigest()
-    return digest
+    return hashlib.sha256(f"{article.title}|{article.summary}".encode("utf-8")).hexdigest()
 
 
 def load_cache(path: Path) -> Dict[str, str]:
-    """Load cached responses from disk."""
     if not path.exists():
         return {}
     try:
@@ -162,310 +159,195 @@ def load_cache(path: Path) -> Dict[str, str]:
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}
     except Exception:
-        pass
+        return {}
     return {}
 
 
 def save_cache(path: Path, cache: Dict[str, str]) -> None:
-    """Persist cache to disk."""
     try:
         with path.open("w", encoding="utf-8") as fh:
             json.dump(cache, fh, ensure_ascii=False, indent=2)
     except Exception:
-        # Fail silently; caching is optional
         pass
 
 
-def read_key() -> str:
-    """Read a single keypress, falling back to newline on non-tty."""
-    if not sys.stdin.isatty():
-        return "\n"
-    if os.name == "nt":
-        import msvcrt
+# Textual UI
+class SummaryView(Static):
+    """Displays a single article summary."""
 
-        ch = msvcrt.getch()
+    def update_content(self, title: str, body: str) -> None:
+        self.update(f"[b]{title}[/b]\n\n{body}")
+
+
+class GuardianApp(App[None]):
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+    Horizontal {
+        height: 1fr;
+    }
+    ListView {
+        width: 40%;
+        border: tall $primary;
+    }
+    SummaryView {
+        border: tall $primary;
+        padding: 1 2;
+    }
+    Input {
+        dock: bottom;
+        display: none;
+    }
+    """
+
+    class Loaded(Message):
+        def __init__(self, articles: list[Article], summaries: list[str]) -> None:
+            self.articles = articles
+            self.summaries = summaries
+            super().__init__()
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("/", "search", "Search"),
+        ("n", "search_next", "Next match"),
+        ("N", "search_prev", "Prev match"),
+    ]
+
+    articles: reactive[list[Article]] = reactive([])
+    summaries: reactive[list[str]] = reactive([])
+    matches_query: reactive[str | None] = reactive(None)
+    current_index: reactive[int] = reactive(0)
+
+    def __init__(self, limit: int, refresh: bool, cache_path: Path) -> None:
+        super().__init__()
+        self.limit = limit
+        self.refresh = refresh
+        self.cache_path = cache_path
+        self.cache = load_cache(cache_path)
+        self.input_active = False
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal():
+            yield ListView(id="list")
+            yield SummaryView(id="summary")
+        yield Input(placeholder="Search...", id="search_input")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        await self.run_worker(self.load_data(), exclusive=True)
+
+    async def load_data(self):
         try:
-            return ch.decode()
-        except Exception:
-            return ""
-    import termios
-    import tty
+            feed = fetch_guardian()
+            articles = parse_rss(feed)[: self.limit] if self.limit > 0 else parse_rss(feed)
+        except Exception as exc:  # network or parsing errors
+            self.exit(f"Failed to load feed: {exc}")
+            return
 
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return ch
-
-
-def wrap_paragraphs(text: str, width: int) -> List[str]:
-    """Wrap multi-paragraph text to a target width."""
-    lines: List[str] = []
-    for para in text.splitlines():
-        if not para.strip():
-            lines.append("")
-            continue
-        lines.extend(textwrap.wrap(para, width=width) or [""])
-    return lines or [""]
-
-
-def build_page_text(
-    idx: int,
-    total: int,
-    article: Article,
-    response: str,
-    term_cols: int,
-    term_lines: int,
-    use_color: bool,
-) -> str:
-    """Create a vertically centered page for one article."""
-    width = max(40, term_cols - 4)
-    content: List[str] = []
-    content.append(color(f"### {idx}/{total} {article.title}", "92;1", use_color))
-    content.append("")
-    content.extend(wrap_paragraphs(response, width=width))
-
-    # Center vertically
-    available_lines = max(10, term_lines - 2)
-    pad_top = max(0, (available_lines - len(content)) // 2)
-    padded = [""] * pad_top + content
-    return "\n".join(padded)
-
-
-def prepare_responses(
-    articles: Sequence[Article],
-    cache: Dict[str, str],
-    refresh: bool,
-) -> List[str]:
-    """Return Farage-styled responses for each article, populating cache."""
-    results: List[str] = []
-    for article in articles:
-        key = f"{article_key(article)}:farage"
-        if not refresh and key in cache:
-            results.append(cache[key])
-            continue
-
-        prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
-        log_status(f"Querying Farage persona for: {article.title}")
-        log_status(f"Prompt:\n{prompt}\n")
-        response = call_tgpt(prompt)
-        cache[key] = response
-        results.append(response)
-    return results
-
-
-def render_noninteractive(
-    articles: Sequence[Article],
-    responses: Sequence[str],
-    use_color: bool,
-) -> None:
-    """Print all summaries sequentially (no paging)."""
-    print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-    print(f"Source: {GUARDIAN_URL}")
-    print(f"Limit: {len(articles)} articles\n")
-    for idx, (article, response) in enumerate(zip(articles, responses), start=1):
-        print(color(f"### {idx}. {article.title}", "92;1", use_color))
-        print(response)
-        print("\n---\n")
-
-
-def find_match(
-    query: str,
-    titles: Sequence[str],
-    responses: Sequence[str],
-    start: int,
-    direction: int = 1,
-) -> int | None:
-    """Find the next index containing the query (case-insensitive), wrapping once."""
-    total = len(titles)
-    if total == 0:
-        return None
-    q = query.lower()
-    idx = start
-    for _ in range(total):
-        idx = (idx + direction) % total
-        if q in titles[idx].lower() or q in responses[idx].lower():
-            return idx
-    return None
-
-
-def render(
-    articles: Sequence[Article],
-    limit: int,
-    use_color: bool,
-    cache_path: Path,
-    refresh: bool,
-) -> None:
-    """Render headlines with Farage summaries and interactive paging."""
-    capped = articles[:limit] if limit > 0 else articles
-    cache = load_cache(cache_path)
-
-    responses = prepare_responses(capped, cache=cache, refresh=refresh)
-
-    # Persist cache regardless of rendering mode
-    save_cache(cache_path, cache)
-
-    # Non-interactive: dump all pages sequentially
-    if not sys.stdout.isatty():
-        render_noninteractive(capped, responses, use_color)
-        return
-
-    # Interactive paging: one summary per full-screen page, vertically centered
-    term = shutil.get_terminal_size(fallback=(80, 24))
-    total_articles = len(capped)
-    idx = 0
-    last_query: str | None = None
-    status_msg: str | None = None
-
-    # Prepare a front page listing all titles
-    title_lines = [color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color)]
-    title_lines.append(f"Source: {GUARDIAN_URL}")
-    title_lines.append(f"Limit: {len(capped)} articles\n")
-    for i, article in enumerate(capped, start=1):
-        title_lines.append(f"{i}. {article.title}")
-    titles_page = "\n".join(title_lines)
-    show_titles = True
-
-    while True:
-        if show_titles:
-            body = titles_page
-            footer = (
-                f"-- Titles page (1 of {total_articles + 1}) -- "
-                "[Enter/space/n/j: next, p/k: prev, /: search, n/N: repeat, q: quit] "
-            )
-        else:
-            page_text = build_page_text(
-                idx=idx + 1,
-                total=total_articles,
-                article=capped[idx],
-                response=responses[idx],
-                term_cols=term.columns,
-                term_lines=term.lines,
-                use_color=use_color,
-            )
-            body = (
-                color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color)
-                + f"\nSource: {GUARDIAN_URL}\n\n"
-                + page_text
-            )
-            footer = (
-                f"-- Page {idx + 2}/{total_articles + 1} -- "
-                "[Enter/space/n/j: next, p/k: prev, /: search, n/N: repeat, q: quit] "
-            )
-
-        sys.stdout.write("\033[2J\033[H")  # clear screen
-        sys.stdout.write(body)
-
-        if status_msg:
-            sys.stdout.write(f"\n\n{status_msg}")
-
-        # Move cursor to bottom line for pager hint
-        sys.stdout.write(f"\033[{term.lines};1H")
-        sys.stdout.write(footer)
-        sys.stdout.flush()
-
-        key = read_key()
-        if not key:
-            continue
-        if key in {"q", "Q"}:
-            break
-        if show_titles:
-            if key in {"p", "k", "P", "K"}:
-                # stay on titles
+        summaries: list[str] = []
+        for article in articles:
+            key = f"{article_key(article)}:farage"
+            if not self.refresh and key in self.cache:
+                summaries.append(self.cache[key])
                 continue
-            # advance to first article
-            show_titles = False
-            idx = 0
-            status_msg = None
-            continue
-        if key in {"p", "k", "P", "K"}:
-            if idx == 0:
-                show_titles = True
-            else:
-                idx -= 1
-            status_msg = None
-            continue
-        if key == "/":
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.write("Search query: ")
-            sys.stdout.flush()
-            query = sys.stdin.readline().strip()
-            if query:
-                last_query = query
-                found = find_match(query, [a.title for a in capped], responses, idx, direction=1)
-                if found is None:
-                    status_msg = f"No match for '{query}'"
-                else:
-                    idx = found
-                    show_titles = False
-                    status_msg = None
-            continue
-        if key in {"n", "N"}:
-            if last_query:
-                direction = 1 if key == "n" else -1
-                found = find_match(last_query, [a.title for a in capped], responses, idx, direction=direction)
-                if found is None:
-                    status_msg = f"No further match for '{last_query}'"
-                else:
-                    idx = found
-                    show_titles = False
-                    status_msg = None
-            continue
-        # default advance
-        if idx + 1 >= total_articles:
-            # wrap to titles
-            show_titles = True
-            idx = 0
-        else:
-            idx += 1
-        status_msg = None
+            prompt = build_prompt(to_three_lines(article.summary, width=120))
+            self.console.print(f"[cyan]Querying tgpt for:[/cyan] {article.title}")
+            self.console.print(f"[dim]{prompt}[/dim]\n")
+            response = call_tgpt(prompt)
+            self.cache[key] = response
+            summaries.append(response)
+        save_cache(self.cache_path, self.cache)
+        await self.post_message(self.Loaded(articles, summaries))
+
+    def on_loaded(self, message: Loaded) -> None:
+        self.articles = message.articles
+        self.summaries = message.summaries
+        list_view = self.query_one(ListView)
+        list_view.clear()
+        for idx, article in enumerate(self.articles):
+            list_view.append(ListItem(Static(f"{idx+1}. {article.title}")))
+        if self.articles:
+            self.show_article(0)
+
+    def show_article(self, index: int) -> None:
+        if not self.articles:
+            return
+        index = max(0, min(index, len(self.articles) - 1))
+        self.current_index = index
+        self.query_one(ListView).index = index
+        self.query_one(SummaryView).update_content(
+            self.articles[index].title, self.summaries[index]
+        )
+
+    def action_quit(self) -> None:
+        self.exit()
+
+    def action_search(self) -> None:
+        search_input = self.query_one("#search_input", Input)
+        search_input.display = True
+        search_input.value = ""
+        search_input.focus()
+        self.input_active = True
+
+    def action_search_next(self) -> None:
+        self._jump_match(direction=1)
+
+    def action_search_prev(self) -> None:
+        self._jump_match(direction=-1)
+
+    def _jump_match(self, direction: int) -> None:
+        if not self.matches_query:
+            return
+        found = find_match(
+            self.matches_query,
+            [a.title for a in self.articles],
+            self.summaries,
+            self.current_index,
+            direction=direction,
+        )
+        if found is not None:
+            self.show_article(found)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        self.show_article(event.index)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        event.input.display = False
+        self.input_active = False
+        if not query:
+            return
+        self.matches_query = query
+        found = find_match(
+            query,
+            [a.title for a in self.articles],
+            self.summaries,
+            self.current_index,
+            direction=1,
+        )
+        if found is not None:
+            self.show_article(found)
+
+    def on_key(self, event: events.Key) -> None:
+        # Preserve j/k navigation even when not bound explicitly
+        if self.input_active:
+            return
+        if event.key in {"j", "down"}:
+            self.show_article(self.current_index + 1)
+        elif event.key in {"k", "up"}:
+            self.show_article(self.current_index - 1)
 
 
-def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description="Guardian reader with Nigel-styled summaries via tgpt (local client)."
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=DEFAULT_LIMIT,
-        help=f"Number of articles to process (default: {DEFAULT_LIMIT})",
-    )
-    parser.add_argument(
-        "--cache-path",
-        type=Path,
-        default=CACHE_PATH,
-        help=f"Path to cache file (default: {CACHE_PATH})",
-    )
-    parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Ignore existing cache and recompute summaries.",
-    )
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Textual Guardian reader with Farage-styled summaries via tgpt.")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Max articles to load (default: 30)")
+    parser.add_argument("--refresh", action="store_true", help="Ignore cache and recompute summaries.")
     args = parser.parse_args(argv)
 
-    try:
-        feed = fetch_guardian()
-        articles = parse_rss(feed)
-    except (HTTPError, URLError, TimeoutError) as exc:
-        sys.stderr.write(f"Network error: {exc}\n")
-        return 1
-    except ET.ParseError as exc:
-        sys.stderr.write(f"Failed to parse RSS feed: {exc}\n")
-        return 1
-    except Exception as exc:
-        sys.stderr.write(f"Unexpected error: {exc}\n")
-        return 1
-
-    if not articles:
-        sys.stderr.write("No headlines found in the Guardian feed.\n")
-        return 1
-
-    use_color = sys.stdout.isatty()
-    render(articles, limit=args.limit, use_color=use_color, cache_path=args.cache_path, refresh=args.refresh)
+    app = GuardianApp(limit=args.limit, refresh=args.refresh, cache_path=CACHE_PATH)
+    app.run()
     return 0
 
 
