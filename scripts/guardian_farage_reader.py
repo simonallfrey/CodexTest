@@ -41,7 +41,6 @@ from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 import subprocess
-import xml.etree.ElementTree as ET
 
 # Configuration
 TGPT_BIN = "/usr/local/bin/tgpt"
@@ -171,6 +170,44 @@ def save_cache(path: Path, cache: Dict[str, str]) -> None:
         pass
 
 
+def prepare_responses(
+    articles: Sequence[Article],
+    cache: Dict[str, str],
+    refresh: bool,
+) -> List[str]:
+    """Return Farage-styled responses for each article, populating cache."""
+    results: List[str] = []
+    for article in articles:
+        key = f"{article_key(article)}:farage"
+        if not refresh and key in cache:
+            results.append(cache[key])
+            continue
+
+        prompt = build_prompt(to_three_lines(article.summary, width=120))
+        sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
+        sys.stderr.write(f"Prompt:\n{prompt}\n\n")
+        sys.stderr.flush()
+        response = call_tgpt(prompt)
+        cache[key] = response
+        results.append(response)
+    return results
+
+
+def render_noninteractive(
+    articles: Sequence[Article],
+    responses: Sequence[str],
+    use_color: bool,
+) -> None:
+    """Print all summaries sequentially (no paging)."""
+    print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
+    print(f"Source: {GUARDIAN_URL}")
+    print(f"Limit: {len(articles)} articles\n")
+    for idx, (article, response) in enumerate(zip(articles, responses), start=1):
+        print(color(f"### {idx}. {article.title}", "92;1", use_color))
+        print(response)
+        print("\n---\n")
+
+
 # Textual UI
 class SummaryView(Static):
     """Displays a single article summary."""
@@ -201,12 +238,6 @@ class GuardianApp(App[None]):
     }
     """
 
-    class Loaded(Message):
-        def __init__(self, articles: list[Article], summaries: list[str]) -> None:
-            self.articles = articles
-            self.summaries = summaries
-            super().__init__()
-
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("/", "search", "Search"),
@@ -219,13 +250,22 @@ class GuardianApp(App[None]):
     matches_query: reactive[str | None] = reactive(None)
     current_index: reactive[int] = reactive(0)
 
-    def __init__(self, limit: int, refresh: bool, cache_path: Path) -> None:
+    def __init__(
+        self,
+        limit: int,
+        refresh: bool,
+        cache_path: Path,
+        articles: list[Article] | None = None,
+        summaries: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.limit = limit
         self.refresh = refresh
         self.cache_path = cache_path
         self.cache = load_cache(cache_path)
         self.input_active = False
+        self.initial_articles = articles or []
+        self.initial_summaries = summaries or []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -236,34 +276,9 @@ class GuardianApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.run_worker(self.load_data(), exclusive=True)
-
-    async def load_data(self):
-        try:
-            feed = fetch_guardian()
-            articles = parse_rss(feed)[: self.limit] if self.limit > 0 else parse_rss(feed)
-        except Exception as exc:  # network or parsing errors
-            self.exit(f"Failed to load feed: {exc}")
-            return
-
-        summaries: list[str] = []
-        for article in articles:
-            key = f"{article_key(article)}:farage"
-            if not self.refresh and key in self.cache:
-                summaries.append(self.cache[key])
-                continue
-            prompt = build_prompt(to_three_lines(article.summary, width=120))
-            self.console.print(f"[cyan]Querying tgpt for:[/cyan] {article.title}")
-            self.console.print(f"[dim]{prompt}[/dim]\n")
-            response = call_tgpt(prompt)
-            self.cache[key] = response
-            summaries.append(response)
-        save_cache(self.cache_path, self.cache)
-        self.post_message(self.Loaded(articles, summaries))
-
-    def on_loaded(self, message: Loaded) -> None:
-        self.articles = message.articles
-        self.summaries = message.summaries
+        # Data is pre-fetched before launching the TUI.
+        self.articles = self.initial_articles
+        self.summaries = self.initial_summaries
         list_view = self.query_one(ListView)
         list_view.clear()
         for idx, article in enumerate(self.articles):
@@ -346,7 +361,31 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--refresh", action="store_true", help="Ignore cache and recompute summaries.")
     args = parser.parse_args(argv)
 
-    app = GuardianApp(limit=args.limit, refresh=args.refresh, cache_path=CACHE_PATH)
+    try:
+        feed = fetch_guardian()
+        all_articles = parse_rss(feed)
+        articles = all_articles[: args.limit] if args.limit > 0 else all_articles
+    except (HTTPError, URLError, TimeoutError) as exc:
+        sys.stderr.write(f"Network error: {exc}\n")
+        return 1
+    except ET.ParseError as exc:
+        sys.stderr.write(f"Failed to parse RSS feed: {exc}\n")
+        return 1
+    except Exception as exc:
+        sys.stderr.write(f"Unexpected error: {exc}\n")
+        return 1
+
+    cache = load_cache(CACHE_PATH)
+    summaries = prepare_responses(articles, cache=cache, refresh=args.refresh)
+    save_cache(CACHE_PATH, cache)
+
+    app = GuardianApp(
+        limit=args.limit,
+        refresh=args.refresh,
+        cache_path=CACHE_PATH,
+        articles=articles,
+        summaries=summaries,
+    )
     app.run()
     return 0
 
