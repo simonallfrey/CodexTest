@@ -211,10 +211,11 @@ def render_noninteractive(
     articles: Sequence[Article],
     responses: Sequence[str],
     use_color: bool,
+    source: str,
 ) -> None:
     """Print all summaries sequentially (no paging)."""
     print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-    print(f"Source: {GUARDIAN_URL}")
+    print(f"Source: {source}")
     print(f"Limit: {len(articles)} articles\n")
     for idx, (article, response) in enumerate(zip(articles, responses), start=1):
         print(color(f"### {idx}. {article.title}", "92;1", use_color))
@@ -444,7 +445,7 @@ def main(argv: list[str]) -> int:
 
     if not sys.stdout.isatty():
         # Non-interactive environments: print summaries and exit
-        render_noninteractive(articles, summaries, use_color=False)
+        render_noninteractive(articles, summaries, use_color=False, source=args.feed_url)
         return 0
 
     app = GuardianApp(
