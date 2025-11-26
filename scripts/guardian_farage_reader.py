@@ -236,7 +236,7 @@ class GuardianApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        await self.run_worker(self.load_data(), exclusive=True)
+        self.run_worker(self.load_data(), exclusive=True)
 
     async def load_data(self):
         try:
