@@ -124,7 +124,7 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
     return filtered
 
 
-def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
+def call_tgpt(prompt: str, bin_path: str, timeout: int = 45) -> str:
     if not os.path.exists(bin_path):
         return "(tgpt binary not found at /usr/local/bin/tgpt)"
     try:
