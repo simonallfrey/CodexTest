@@ -102,8 +102,8 @@ def build_dual_prompt(summary: str) -> str:
         random_noise(80),
         (
             "Provide two concise summaries (3-5 sentences each) of the following text. "
-            "First write the far-right British politician view (e.g., Nigel Farrage) under the marker '===FARAGE==='. "
-            "Then write the centre-left British politician view (e.g., Keir Starmer) under the marker '===STARMER==='. "
+            "First write in the voice of a far-right British politician (e.g., Nigel Farrage) under the marker '===FARAGE==='. "
+            "Then write in the voice of a centre-left British politician (e.g., Keir Starmer) under the marker '===STARMER==='. "
             "Do not include any other text, introductions, or labels. Format exactly:\n"
             "===FARAGE===\n<farage summary>\n===STARMER===\n<starmer summary>"
         ),
