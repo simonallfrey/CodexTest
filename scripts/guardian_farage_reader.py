@@ -35,6 +35,11 @@ PROMPT_INSTRUCTION = (
     "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
     "no preamble—start directly with the summary"
 )
+PROMPT_INSTRUCTION_STARMER = (
+    "summarise the following in the character of a centre-left British politician such as Keir Starmer; "
+    "measured, pragmatic tone; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
+    "no preamble—start directly with the summary"
+)
 
 
 @dataclass(frozen=True)
@@ -91,11 +96,22 @@ def random_noise(length: int = 16) -> str:
 
 
 def build_prompt(summary: str) -> str:
-    """Construct the prompt passed to tgpt."""
+    """Construct the prompt passed to tgpt (Farage style)."""
     parts = [
         "ignore the next line",
         random_noise(),
         PROMPT_INSTRUCTION,
+        summary,
+    ]
+    return "\n".join(parts)
+
+
+def build_prompt_starmer(summary: str) -> str:
+    """Construct the prompt passed to tgpt (Starmer style)."""
+    parts = [
+        "ignore the next line",
+        random_noise(),
+        PROMPT_INSTRUCTION_STARMER,
         summary,
     ]
     return "\n".join(parts)
@@ -237,21 +253,34 @@ def render(
     cache_path: Path,
     refresh: bool,
 ) -> None:
-    """Render headlines and summaries with interactive paging."""
+    """Render headlines with two persona summaries and interactive paging."""
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
     # Prepare responses (respect cache)
-    responses: List[str] = []
+    responses_farage: List[str] = []
+    responses_starmer: List[str] = []
     for article in capped:
         key = article_key(article)
-        if not refresh and key in cache:
-            response = cache[key]
+        farage_key = f"{key}:farage"
+        starmer_key = f"{key}:starmer"
+
+        if not refresh and farage_key in cache:
+            resp_farage = cache[farage_key]
         else:
-            prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
-            response = call_tgpt(prompt)
-            cache[key] = response
-        responses.append(response)
+            prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
+            resp_farage = call_tgpt(prompt_f)
+            cache[farage_key] = resp_farage
+
+        if not refresh and starmer_key in cache:
+            resp_starmer = cache[starmer_key]
+        else:
+            prompt_s = build_prompt_starmer(" ".join(to_three_lines(article.summary, width=120)))
+            resp_starmer = call_tgpt(prompt_s)
+            cache[starmer_key] = resp_starmer
+
+        responses_farage.append(resp_farage)
+        responses_starmer.append(resp_starmer)
 
     # Persist cache regardless of rendering mode
     save_cache(cache_path, cache)
@@ -261,9 +290,15 @@ def render(
         print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
         print(f"Source: {GUARDIAN_URL}")
         print(f"Limit: {len(capped)} articles\n")
-        for idx, (article, response) in enumerate(zip(capped, responses), start=1):
+        for idx, (article, resp_f, resp_s) in enumerate(
+            zip(capped, responses_farage, responses_starmer), start=1
+        ):
             print(color(f"### {idx}. {article.title}", "92;1", use_color))
-            print(response)
+            print(color("Farage:", "91;1", use_color))
+            print(resp_f)
+            print("")
+            print(color("Starmer:", "94;1", use_color))
+            print(resp_s)
             print("\n---\n")
         return
 
@@ -286,11 +321,20 @@ def render(
             body = titles_page
             footer = f"-- Titles page (1 of {total_articles + 1}) -- [Enter/space/n/j: next, q: quit] "
         else:
+            combined_response = (
+                color("Farage:", "91;1", use_color)
+                + "\n"
+                + responses_farage[idx]
+                + "\n\n"
+                + color("Starmer:", "94;1", use_color)
+                + "\n"
+                + responses_starmer[idx]
+            )
             page_text = build_page_text(
                 idx=idx + 1,
                 total=total_articles,
                 article=capped[idx],
-                response=responses[idx],
+                response=combined_response,
                 term_cols=term.columns,
                 term_lines=term.lines,
                 use_color=use_color,
