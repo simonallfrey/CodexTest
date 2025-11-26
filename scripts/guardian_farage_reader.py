@@ -259,7 +259,7 @@ class GuardianApp(App[None]):
             self.cache[key] = response
             summaries.append(response)
         save_cache(self.cache_path, self.cache)
-        await self.post_message(self.Loaded(articles, summaries))
+        self.post_message(self.Loaded(articles, summaries))
 
     def on_loaded(self, message: Loaded) -> None:
         self.articles = message.articles
