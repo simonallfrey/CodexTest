@@ -95,23 +95,18 @@ def random_noise(length: int = 16) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-def build_prompt(summary: str) -> str:
-    """Construct the prompt passed to tgpt (Farage style)."""
+def build_dual_prompt(summary: str) -> str:
+    """Construct a single prompt requesting both personas, delimited for parsing."""
     parts = [
         "ignore the next line",
         random_noise(80),
-        PROMPT_INSTRUCTION,
-        summary,
-    ]
-    return "\n".join(parts)
-
-
-def build_prompt_starmer(summary: str) -> str:
-    """Construct the prompt passed to tgpt (Starmer style)."""
-    parts = [
-        "ignore the next line",
-        random_noise(80),
-        PROMPT_INSTRUCTION_STARMER,
+        (
+            "Provide two concise summaries (3-5 sentences each) of the following text. "
+            "First write the far-right British politician view (e.g., Nigel Farrage) under the marker '===FARAGE==='. "
+            "Then write the centre-left British politician view (e.g., Keir Starmer) under the marker '===STARMER==='. "
+            "Do not include any other text, introductions, or labels. Format exactly:\n"
+            "===FARAGE===\n<farage summary>\n===STARMER===\n<starmer summary>"
+        ),
         summary,
     ]
     return "\n".join(parts)
@@ -125,6 +120,24 @@ def strip_meta_lines(lines: Iterable[str]) -> List[str]:
     while filtered and re.match(r"(?i)(here['’]s (a )?summary|here['’]s (a )?view)", filtered[0].strip()):
         filtered.pop(0)
     return filtered
+
+
+def parse_dual_response(text: str) -> tuple[str, str]:
+    """Extract Farage and Starmer sections from a delimited response."""
+    farage, starmer = "", ""
+    lower = text.lower()
+    if "===farage===" in lower and "===starmer===" in lower:
+        # split on markers case-insensitively
+        parts = re.split(r"===farage===|\s*===starmer===\s*", text, flags=re.IGNORECASE)
+        # re.split yields ['', before, between, after] depending on text; pick non-empty
+        non_empty = [p.strip() for p in parts if p.strip()]
+        if len(non_empty) >= 2:
+            farage, starmer = non_empty[0], non_empty[1]
+    if not farage:
+        farage = text.strip()
+    if not starmer:
+        starmer = text.strip()
+    return farage, starmer
 
 
 def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
@@ -257,7 +270,7 @@ def render(
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
-    # Prepare responses (respect cache)
+    # Prepare responses (respect cache) with a single tgpt call per article
     responses_farage: List[str] = []
     responses_starmer: List[str] = []
     for article in capped:
@@ -265,24 +278,17 @@ def render(
         farage_key = f"{key}:farage"
         starmer_key = f"{key}:starmer"
 
-        if not refresh and farage_key in cache:
+        if not refresh and farage_key in cache and starmer_key in cache:
             resp_farage = cache[farage_key]
-        else:
-            prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
-            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
-            sys.stderr.write(f"Prompt:\n{prompt_f}\n\n")
-            sys.stderr.flush()
-            resp_farage = call_tgpt(prompt_f)
-            cache[farage_key] = resp_farage
-
-        if not refresh and starmer_key in cache:
             resp_starmer = cache[starmer_key]
         else:
-            prompt_s = build_prompt_starmer(" ".join(to_three_lines(article.summary, width=120)))
-            sys.stderr.write(f"Querying Starmer persona for: {article.title}\n")
-            sys.stderr.write(f"Prompt:\n{prompt_s}\n\n")
+            prompt_dual = build_dual_prompt(" ".join(to_three_lines(article.summary, width=120)))
+            sys.stderr.write(f"Querying combined personas for: {article.title}\n")
+            sys.stderr.write(f"Prompt:\n{prompt_dual}\n\n")
             sys.stderr.flush()
-            resp_starmer = call_tgpt(prompt_s)
+            combined = call_tgpt(prompt_dual)
+            resp_farage, resp_starmer = parse_dual_response(combined)
+            cache[farage_key] = resp_farage
             cache[starmer_key] = resp_starmer
 
         responses_farage.append(resp_farage)
