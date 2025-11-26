@@ -207,6 +207,26 @@ def render_noninteractive(
         print("\n---\n")
 
 
+def find_match(
+    query: str,
+    titles: Sequence[str],
+    responses: Sequence[str],
+    start: int,
+    direction: int = 1,
+) -> int | None:
+    """Find the next index containing the query (case-insensitive), wrapping once."""
+    total = len(titles)
+    if total == 0:
+        return None
+    q = query.lower()
+    idx = start
+    for _ in range(total):
+        idx = (idx + direction) % total
+        if q in titles[idx].lower() or q in responses[idx].lower():
+            return idx
+    return None
+
+
 # Textual UI
 class SummaryView(Static):
     """Displays a single article summary."""
