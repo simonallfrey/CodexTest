@@ -32,11 +32,11 @@ from typing import Dict, Iterable, List, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from html import unescape
+import xml.etree.ElementTree as ET
 
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
