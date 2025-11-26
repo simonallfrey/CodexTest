@@ -237,7 +237,7 @@ def render(
     cache_path: Path,
     refresh: bool,
 ) -> None:
-    """Render headlines and summaries, one page per article."""
+    """Render headlines and summaries with interactive paging."""
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
@@ -269,28 +269,47 @@ def render(
 
     # Interactive paging: one summary per full-screen page, vertically centered
     term = shutil.get_terminal_size(fallback=(80, 24))
-    total = len(capped)
+    total_articles = len(capped)
     idx = 0
+
+    # Prepare a front page listing all titles
+    title_lines = [color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color)]
+    title_lines.append(f"Source: {GUARDIAN_URL}")
+    title_lines.append(f"Limit: {len(capped)} articles\n")
+    for i, article in enumerate(capped, start=1):
+        title_lines.append(f"{i}. {article.title}")
+    titles_page = "\n".join(title_lines)
+    show_titles = True
+
     while True:
-        page_text = build_page_text(
-            idx=idx + 1,
-            total=total,
-            article=capped[idx],
-            response=responses[idx],
-            term_cols=term.columns,
-            term_lines=term.lines,
-            use_color=use_color,
-        )
+        if show_titles:
+            body = titles_page
+            footer = f"-- Titles page (1 of {total_articles + 1}) -- [Enter/space/n/j: next, q: quit] "
+        else:
+            page_text = build_page_text(
+                idx=idx + 1,
+                total=total_articles,
+                article=capped[idx],
+                response=responses[idx],
+                term_cols=term.columns,
+                term_lines=term.lines,
+                use_color=use_color,
+            )
+            body = (
+                color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color)
+                + f"\nSource: {GUARDIAN_URL}\n\n"
+                + page_text
+            )
+            footer = (
+                f"-- Page {idx + 2}/{total_articles + 1} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
+            )
+
         sys.stdout.write("\033[2J\033[H")  # clear screen
-        sys.stdout.write(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-        sys.stdout.write(f"\nSource: {GUARDIAN_URL}\n\n")
-        sys.stdout.write(page_text)
+        sys.stdout.write(body)
 
         # Move cursor to bottom line for pager hint
         sys.stdout.write(f"\033[{term.lines};1H")
-        sys.stdout.write(
-            f"-- Page {idx + 1}/{total} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
-        )
+        sys.stdout.write(footer)
         sys.stdout.flush()
 
         key = read_key()
@@ -298,13 +317,27 @@ def render(
             continue
         if key in {"q", "Q"}:
             break
+        if show_titles:
+            if key in {"p", "k", "P", "K"}:
+                # stay on titles
+                continue
+            # advance to first article
+            show_titles = False
+            idx = 0
+            continue
         if key in {"p", "k", "P", "K"}:
-            idx = max(0, idx - 1)
+            if idx == 0:
+                show_titles = True
+            else:
+                idx -= 1
             continue
         # default advance
-        if idx + 1 >= total:
-            break
-        idx += 1
+        if idx + 1 >= total_articles:
+            # wrap to titles
+            show_titles = True
+            idx = 0
+        else:
+            idx += 1
 
 
 def main(argv: List[str]) -> int:
