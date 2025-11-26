@@ -37,7 +37,6 @@ import xml.etree.ElementTree as ET
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 import subprocess
@@ -245,11 +244,6 @@ class GuardianApp(App[None]):
         ("N", "search_prev", "Prev match"),
     ]
 
-    articles: reactive[list[Article]] = reactive([])
-    summaries: reactive[list[str]] = reactive([])
-    matches_query: reactive[str | None] = reactive(None)
-    current_index: reactive[int] = reactive(0)
-
     def __init__(
         self,
         limit: int,
@@ -266,6 +260,10 @@ class GuardianApp(App[None]):
         self.input_active = False
         self.initial_articles = articles or []
         self.initial_summaries = summaries or []
+        self.articles: list[Article] = []
+        self.summaries: list[str] = []
+        self.matches_query: str | None = None
+        self.current_index: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
