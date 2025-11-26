@@ -9,14 +9,17 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from html import unescape
+import hashlib
+import json
 import os
 import re
 import secrets
 import string
 import subprocess
 import sys
+from pathlib import Path
 from textwrap import wrap
-from typing import Iterable, List, Sequence
+from typing import Dict, Iterable, List, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -24,6 +27,7 @@ import xml.etree.ElementTree as ET
 TGPT_BIN = "/usr/local/bin/tgpt"
 GUARDIAN_URL = "https://www.theguardian.com/international/rss"
 DEFAULT_LIMIT = 10
+CACHE_PATH = Path(".guardian_farage_cache.json")
 PROMPT_INSTRUCTION = (
     "summarise the following in the character of a far right british politician such as Nigel Farrage; "
     "serious and direct; no jokes or memes; no meta talk; no quotation marks; keep it concise (3-5 sentences); "
@@ -135,19 +139,58 @@ def color(text: str, code: str, enabled: bool) -> str:
     return f"\033[{code}m{text}\033[0m" if enabled else text
 
 
-def render(articles: Sequence[Article], limit: int, use_color: bool) -> None:
+def article_key(article: Article) -> str:
+    """Stable key for caching per-article responses."""
+    digest = hashlib.sha256(f"{article.title}|{article.summary}".encode("utf-8")).hexdigest()
+    return digest
+
+
+def load_cache(path: Path) -> Dict[str, str]:
+    """Load cached responses from disk."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def save_cache(path: Path, cache: Dict[str, str]) -> None:
+    """Persist cache to disk."""
+    try:
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        # Fail silently; caching is optional
+        pass
+
+
+def render(articles: Sequence[Article], limit: int, use_color: bool, cache_path: Path, refresh: bool) -> None:
     """Print headlines and tgpt-rendered summaries."""
     capped = articles[:limit] if limit > 0 else articles
+    cache = load_cache(cache_path)
+
     print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
     print(f"Source: {GUARDIAN_URL}")
     print(f"Limit: {len(capped)} articles\n")
 
     for idx, article in enumerate(capped, start=1):
         prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
-        response = call_tgpt(prompt)
+        key = article_key(article)
+        if not refresh and key in cache:
+            response = cache[key]
+        else:
+            response = call_tgpt(prompt)
+            cache[key] = response
         print(color(f"### {idx}. {article.title}", "92;1", use_color))
         print(response)
         print("\n---\n")
+
+    save_cache(cache_path, cache)
 
 
 def main(argv: List[str]) -> int:
@@ -159,6 +202,17 @@ def main(argv: List[str]) -> int:
         type=int,
         default=DEFAULT_LIMIT,
         help=f"Number of articles to process (default: {DEFAULT_LIMIT})",
+    )
+    parser.add_argument(
+        "--cache-path",
+        type=Path,
+        default=CACHE_PATH,
+        help=f"Path to cache file (default: {CACHE_PATH})",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ignore existing cache and recompute summaries.",
     )
     args = parser.parse_args(argv)
 
@@ -180,7 +234,7 @@ def main(argv: List[str]) -> int:
         return 1
 
     use_color = sys.stdout.isatty()
-    render(articles, limit=args.limit, use_color=use_color)
+    render(articles, limit=args.limit, use_color=use_color, cache_path=args.cache_path, refresh=args.refresh)
     return 0
 
 
