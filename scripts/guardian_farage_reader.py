@@ -17,6 +17,7 @@ import secrets
 import string
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from textwrap import wrap
 from typing import Dict, Iterable, List, Sequence
@@ -169,28 +170,137 @@ def save_cache(path: Path, cache: Dict[str, str]) -> None:
         pass
 
 
-def render(articles: Sequence[Article], limit: int, use_color: bool, cache_path: Path, refresh: bool) -> None:
-    """Print headlines and tgpt-rendered summaries."""
+def read_key() -> str:
+    """Read a single keypress, falling back to newline on non-tty."""
+    if not sys.stdin.isatty():
+        return "\n"
+    if os.name == "nt":
+        import msvcrt
+
+        ch = msvcrt.getch()
+        try:
+            return ch.decode()
+        except Exception:
+            return ""
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return ch
+
+
+def wrap_paragraphs(text: str, width: int) -> List[str]:
+    """Wrap multi-paragraph text to a target width."""
+    lines: List[str] = []
+    for para in text.splitlines():
+        if not para.strip():
+            lines.append("")
+            continue
+        lines.extend(textwrap.wrap(para, width=width) or [""])
+    return lines or [""]
+
+
+def build_page_text(
+    idx: int,
+    total: int,
+    article: Article,
+    response: str,
+    term_cols: int,
+    term_lines: int,
+    use_color: bool,
+) -> str:
+    """Create a vertically centered page for one article."""
+    width = max(40, term_cols - 4)
+    content: List[str] = []
+    content.append(color(f"### {idx}/{total} {article.title}", "92;1", use_color))
+    content.append("")
+    content.extend(wrap_paragraphs(response, width=width))
+
+    # Center vertically
+    available_lines = max(10, term_lines - 2)
+    pad_top = max(0, (available_lines - len(content)) // 2)
+    padded = [""] * pad_top + content
+    return "\n".join(padded)
+
+
+def render(
+    articles: Sequence[Article],
+    limit: int,
+    use_color: bool,
+    cache_path: Path,
+    refresh: bool,
+) -> None:
+    """Render headlines and summaries, one page per article."""
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
-    print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-    print(f"Source: {GUARDIAN_URL}")
-    print(f"Limit: {len(capped)} articles\n")
-
-    for idx, article in enumerate(capped, start=1):
-        prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
+    # Prepare responses (respect cache)
+    responses: List[str] = []
+    for article in capped:
         key = article_key(article)
         if not refresh and key in cache:
             response = cache[key]
         else:
+            prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
             response = call_tgpt(prompt)
             cache[key] = response
-        print(color(f"### {idx}. {article.title}", "92;1", use_color))
-        print(response)
-        print("\n---\n")
+        responses.append(response)
 
+    # Persist cache regardless of rendering mode
     save_cache(cache_path, cache)
+
+    # Non-interactive: dump all pages sequentially
+    if not sys.stdout.isatty():
+        print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
+        print(f"Source: {GUARDIAN_URL}")
+        print(f"Limit: {len(capped)} articles\n")
+        for idx, (article, response) in enumerate(zip(capped, responses), start=1):
+            print(color(f"### {idx}. {article.title}", "92;1", use_color))
+            print(response)
+            print("\n---\n")
+        return
+
+    # Interactive paging: one summary per full-screen page, vertically centered
+    term = shutil.get_terminal_size(fallback=(80, 24))
+    total = len(capped)
+    idx = 0
+    while True:
+        page_text = build_page_text(
+            idx=idx + 1,
+            total=total,
+            article=capped[idx],
+            response=responses[idx],
+            term_cols=term.columns,
+            term_lines=term.lines,
+            use_color=use_color,
+        )
+        sys.stdout.write("\033[2J\033[H")  # clear screen
+        sys.stdout.write(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
+        sys.stdout.write(f"\nSource: {GUARDIAN_URL}\n\n")
+        sys.stdout.write(page_text)
+        sys.stdout.write(
+            f"\n\n-- Page {idx + 1}/{total} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
+        )
+        sys.stdout.flush()
+
+        key = read_key()
+        if not key:
+            continue
+        if key in {"q", "Q"}:
+            break
+        if key in {"p", "k", "P", "K"}:
+            idx = max(0, idx - 1)
+            continue
+        # default advance
+        if idx + 1 >= total:
+            break
+        idx += 1
 
 
 def main(argv: List[str]) -> int:
