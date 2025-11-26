@@ -37,9 +37,7 @@ from urllib.request import Request, urlopen
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
 from textual.message import Message
-from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, ListItem, ListView, LoadingIndicator, Static
 
@@ -417,12 +415,6 @@ class ArticleScreen(Screen):
 class GuardianApp(App[None]):
     CSS_PATH = None  # inline CSS used
     SCREENS = {"headlines": HeadlinesScreen}
-
-    articles: reactive[list[Article]] = reactive([])
-    summaries: reactive[Dict[int, str]] = reactive({})
-    matches_query: reactive[str | None] = reactive(None)
-    current_index: reactive[int] = reactive(0)
-
     def __init__(
         self,
         feed_url: str,
@@ -444,6 +436,10 @@ class GuardianApp(App[None]):
         self.quiet = quiet
         self.cache_only = cache_only
         self.cache: Dict[str, str] = load_cache(cache_path)
+        self.articles: list[Article] = []
+        self.summaries: Dict[int, str] = {}
+        self.matches_query: str | None = None
+        self.current_index: int = 0
 
     def compose(self) -> ComposeResult:
         yield HeadlinesScreen()
