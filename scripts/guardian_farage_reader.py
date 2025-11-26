@@ -3,11 +3,11 @@
 Guardian headlines reader rendered with Textual.
 
 Behavior
-- Fetches Guardian RSS headlines and summaries.
-- Builds a Farage-style summary via a single tgpt prompt per article (cached).
-- Presents a split-view TUI: headlines list (left) and summary pane (right).
-- Searching: press "/" to enter a query; "n"/"N" to jump next/previous match.
-- Navigation: arrow keys or j/k to move; Enter/space to open selection.
+- Fetch Guardian RSS headlines and summaries.
+- Build a Farage-style summary via a single tgpt prompt per article (cached).
+- TUI flow: overview page with all titles; selecting shows a single-article view.
+- Navigation: arrows or j/k move; Enter/space opens; gg returns to overview; G jumps to last article.
+- Search: "/" to enter a query; "n"/"N" to jump next/previous match.
 
 Requirements
 - Python 3.10+
@@ -25,14 +25,14 @@ import os
 import re
 import secrets
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from textwrap import wrap
 from typing import Dict, Iterable, List, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from html import unescape
-import xml.etree.ElementTree as ET
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -258,7 +258,6 @@ class GuardianApp(App[None]):
         self.limit = limit
         self.refresh = refresh
         self.cache_path = cache_path
-        self.cache = load_cache(cache_path)
         self.input_active = False
         self.initial_articles = articles or []
         self.initial_summaries = summaries or []
@@ -410,6 +409,11 @@ def main(argv: list[str]) -> int:
     cache = load_cache(CACHE_PATH)
     summaries = prepare_responses(articles, cache=cache, refresh=args.refresh)
     save_cache(CACHE_PATH, cache)
+
+    if not sys.stdout.isatty():
+        # Non-interactive environments: print summaries and exit
+        render_noninteractive(articles, summaries, use_color=False)
+        return 0
 
     app = GuardianApp(
         limit=args.limit,
