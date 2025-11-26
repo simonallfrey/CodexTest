@@ -144,9 +144,6 @@ def main(argv: list[str]) -> int:
         prompt = build_prompt(" ".join(to_three_lines(summary, width=120)))
         response = call_tgpt(prompt)
         print(color(f"### {idx}. {headline}", "92;1", use_color))
-        print(color("Prompt:", "90;1", use_color))
-        print(prompt)
-        print(color("Response:", "90;1", use_color))
         print(response)
         print("\n---\n")
 
