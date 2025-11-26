@@ -285,8 +285,11 @@ def render(
         sys.stdout.write(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
         sys.stdout.write(f"\nSource: {GUARDIAN_URL}\n\n")
         sys.stdout.write(page_text)
+
+        # Move cursor to bottom line for pager hint
+        sys.stdout.write(f"\033[{term.lines};1H")
         sys.stdout.write(
-            f"\n\n-- Page {idx + 1}/{total} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
+            f"-- Page {idx + 1}/{total} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
         )
         sys.stdout.flush()
 
