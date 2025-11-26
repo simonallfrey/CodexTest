@@ -233,12 +233,8 @@ class HeadlinesScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Horizontal():
-            self.list_view = ListView(id="headlines")
-            self.loading = LoadingIndicator(id="loading", classes="hidden")
-            container = Static()
-            container.update(self.loading)
-            yield self.list_view
+        self.list_view = ListView(id="headlines")
+        yield self.list_view
         yield Input(placeholder="Search...", id="search_input", classes="hidden")
         yield Footer()
 
