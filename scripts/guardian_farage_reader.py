@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from html import unescape
 import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
-import string
 import subprocess
 import sys
 import textwrap
@@ -25,6 +23,7 @@ from typing import Dict, Iterable, List, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
+from html import unescape
 
 TGPT_BIN = "/usr/local/bin/tgpt"
 GUARDIAN_URL = "https://www.theguardian.com/international/rss"
@@ -86,7 +85,7 @@ def to_three_lines(text: str, width: int = 80) -> List[str]:
 
 def random_noise(length: int = 16) -> str:
     """Return a line of random characters to precede the instruction."""
-    alphabet = string.ascii_letters + string.digits
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
@@ -139,6 +138,12 @@ def call_tgpt(prompt: str, bin_path: str = TGPT_BIN, timeout: int = 45) -> str:
 def color(text: str, code: str, enabled: bool) -> str:
     """Optional ANSI coloring when stdout is a TTY."""
     return f"\033[{code}m{text}\033[0m" if enabled else text
+
+
+def log_status(message: str) -> None:
+    """Emit a status line to stderr."""
+    sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
 
 
 def article_key(article: Article) -> str:
@@ -230,6 +235,43 @@ def build_page_text(
     return "\n".join(padded)
 
 
+def prepare_responses(
+    articles: Sequence[Article],
+    cache: Dict[str, str],
+    refresh: bool,
+) -> List[str]:
+    """Return Farage-styled responses for each article, populating cache."""
+    results: List[str] = []
+    for article in articles:
+        key = f"{article_key(article)}:farage"
+        if not refresh and key in cache:
+            results.append(cache[key])
+            continue
+
+        prompt = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
+        log_status(f"Querying Farage persona for: {article.title}")
+        log_status(f"Prompt:\n{prompt}\n")
+        response = call_tgpt(prompt)
+        cache[key] = response
+        results.append(response)
+    return results
+
+
+def render_noninteractive(
+    articles: Sequence[Article],
+    responses: Sequence[str],
+    use_color: bool,
+) -> None:
+    """Print all summaries sequentially (no paging)."""
+    print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
+    print(f"Source: {GUARDIAN_URL}")
+    print(f"Limit: {len(articles)} articles\n")
+    for idx, (article, response) in enumerate(zip(articles, responses), start=1):
+        print(color(f"### {idx}. {article.title}", "92;1", use_color))
+        print(response)
+        print("\n---\n")
+
+
 def render(
     articles: Sequence[Article],
     limit: int,
@@ -241,36 +283,14 @@ def render(
     capped = articles[:limit] if limit > 0 else articles
     cache = load_cache(cache_path)
 
-    # Prepare responses (respect cache)
-    responses_farage: List[str] = []
-    for article in capped:
-        key = article_key(article)
-        farage_key = f"{key}:farage"
-
-        if not refresh and farage_key in cache:
-            resp_farage = cache[farage_key]
-        else:
-            prompt_f = build_prompt(" ".join(to_three_lines(article.summary, width=120)))
-            sys.stderr.write(f"Querying Farage persona for: {article.title}\n")
-            sys.stderr.write(f"Prompt:\n{prompt_f}\n\n")
-            sys.stderr.flush()
-            resp_farage = call_tgpt(prompt_f)
-            cache[farage_key] = resp_farage
-
-        responses_farage.append(resp_farage)
+    responses = prepare_responses(capped, cache=cache, refresh=refresh)
 
     # Persist cache regardless of rendering mode
     save_cache(cache_path, cache)
 
     # Non-interactive: dump all pages sequentially
     if not sys.stdout.isatty():
-        print(color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color))
-        print(f"Source: {GUARDIAN_URL}")
-        print(f"Limit: {len(capped)} articles\n")
-        for idx, (article, resp_f) in enumerate(zip(capped, responses_farage), start=1):
-            print(color(f"### {idx}. {article.title}", "92;1", use_color))
-            print(resp_f)
-            print("\n---\n")
+        render_noninteractive(capped, responses, use_color)
         return
 
     # Interactive paging: one summary per full-screen page, vertically centered
@@ -296,7 +316,7 @@ def render(
                 idx=idx + 1,
                 total=total_articles,
                 article=capped[idx],
-                response=responses_farage[idx],
+                response=responses[idx],
                 term_cols=term.columns,
                 term_lines=term.lines,
                 use_color=use_color,
