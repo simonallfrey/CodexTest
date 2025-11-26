@@ -272,6 +272,26 @@ def render_noninteractive(
         print("\n---\n")
 
 
+def find_match(
+    query: str,
+    titles: Sequence[str],
+    responses: Sequence[str],
+    start: int,
+    direction: int = 1,
+) -> int | None:
+    """Find the next index containing the query (case-insensitive), wrapping once."""
+    total = len(titles)
+    if total == 0:
+        return None
+    q = query.lower()
+    idx = start
+    for _ in range(total):
+        idx = (idx + direction) % total
+        if q in titles[idx].lower() or q in responses[idx].lower():
+            return idx
+    return None
+
+
 def render(
     articles: Sequence[Article],
     limit: int,
@@ -297,6 +317,8 @@ def render(
     term = shutil.get_terminal_size(fallback=(80, 24))
     total_articles = len(capped)
     idx = 0
+    last_query: str | None = None
+    status_msg: str | None = None
 
     # Prepare a front page listing all titles
     title_lines = [color("# Guardian Headlines (Nigel-styled summaries via tgpt)", "96;1", use_color)]
@@ -310,7 +332,10 @@ def render(
     while True:
         if show_titles:
             body = titles_page
-            footer = f"-- Titles page (1 of {total_articles + 1}) -- [Enter/space/n/j: next, q: quit] "
+            footer = (
+                f"-- Titles page (1 of {total_articles + 1}) -- "
+                "[Enter/space/n/j: next, p/k: prev, /: search, n/N: repeat, q: quit] "
+            )
         else:
             page_text = build_page_text(
                 idx=idx + 1,
@@ -327,11 +352,15 @@ def render(
                 + page_text
             )
             footer = (
-                f"-- Page {idx + 2}/{total_articles + 1} -- [Enter/space/n/j: next, p/k: prev, q: quit] "
+                f"-- Page {idx + 2}/{total_articles + 1} -- "
+                "[Enter/space/n/j: next, p/k: prev, /: search, n/N: repeat, q: quit] "
             )
 
         sys.stdout.write("\033[2J\033[H")  # clear screen
         sys.stdout.write(body)
+
+        if status_msg:
+            sys.stdout.write(f"\n\n{status_msg}")
 
         # Move cursor to bottom line for pager hint
         sys.stdout.write(f"\033[{term.lines};1H")
@@ -350,12 +379,40 @@ def render(
             # advance to first article
             show_titles = False
             idx = 0
+            status_msg = None
             continue
         if key in {"p", "k", "P", "K"}:
             if idx == 0:
                 show_titles = True
             else:
                 idx -= 1
+            status_msg = None
+            continue
+        if key == "/":
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write("Search query: ")
+            sys.stdout.flush()
+            query = sys.stdin.readline().strip()
+            if query:
+                last_query = query
+                found = find_match(query, [a.title for a in capped], responses, idx, direction=1)
+                if found is None:
+                    status_msg = f"No match for '{query}'"
+                else:
+                    idx = found
+                    show_titles = False
+                    status_msg = None
+            continue
+        if key in {"n", "N"}:
+            if last_query:
+                direction = 1 if key == "n" else -1
+                found = find_match(last_query, [a.title for a in capped], responses, idx, direction=direction)
+                if found is None:
+                    status_msg = f"No further match for '{last_query}'"
+                else:
+                    idx = found
+                    show_titles = False
+                    status_msg = None
             continue
         # default advance
         if idx + 1 >= total_articles:
@@ -364,6 +421,7 @@ def render(
             idx = 0
         else:
             idx += 1
+        status_msg = None
 
 
 def main(argv: List[str]) -> int:
