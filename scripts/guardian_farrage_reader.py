@@ -454,8 +454,8 @@ class GuardianApp(App[None]):
         self.run_worker(self._load_feed(), thread=True, exclusive=True)
 
     def _show_loading(self) -> None:
-        screen = self.get_screen("headlines")
-        if isinstance(screen, HeadlinesScreen):
+        screen = self.screen
+        if isinstance(screen, HeadlinesScreen) and hasattr(screen, "list_view"):
             screen.list_view.clear()
             screen.list_view.append(ListItem(LoadingIndicator()))
 
