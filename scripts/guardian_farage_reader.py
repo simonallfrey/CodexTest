@@ -380,8 +380,11 @@ class GuardianApp(App[None]):
                 self.show_article(self.current_index + 1)
         elif event.key in {"k", "up"}:
             if self.showing_overview:
-                return
-            self.show_article(self.current_index - 1)
+                self.render_overview()
+            elif self.current_index == 0:
+                self.render_overview()
+            else:
+                self.show_article(self.current_index - 1)
 
 
 def main(argv: list[str]) -> int:
